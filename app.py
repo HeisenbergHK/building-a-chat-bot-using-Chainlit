@@ -36,3 +36,13 @@ async def main(message: cl.Message):
     await openai_client.stream_update_response(message_history, response)
 
     cl.user_session.set("message_history", message_history)
+
+@cl.set_starters
+async def set_starters(message: cl.Message):
+    return [
+        cl.Starter(
+            label="Introduction",
+            message="Introduce yourself.",
+            icon="/images/hurricane-alt-svgrepo-com.svg",
+        )
+    ]
