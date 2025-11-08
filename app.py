@@ -4,6 +4,7 @@ import chainlit as cl
 from dotenv import load_dotenv
 
 from openai_client import OpenAIClient
+from chainlit.input_widget import Select, Switch, Slider
 
 load_dotenv()
 
@@ -33,12 +34,55 @@ def auth_callback(username: str, password: str):
 @cl.on_chat_start
 async def start_chat():
 
+    # Initializing chat settings
+    setting = await cl.ChatSettings(
+        [
+            Slider(
+                id="temperature",
+                label="Temperature",
+                min=0,
+                max=1,
+                step=0.1,
+                initial=0.5,
+            ),
+            Slider(id="top_p", label="Top P", min=0.1, max=1, step=0.1, initial=1.0),
+            Slider(
+                id="frequency_penalty",
+                label="Frequency Penalty",
+                min=-2,
+                max=2,
+                step=0.1,
+                initial=0.0,
+            ),
+            Slider(
+                id="presence_penalty",
+                label="Presence Penalty",
+                min=-2,
+                max=2,
+                step=0.1,
+                initial=0.0,
+            ),
+        ]
+    ).send()
+
+    # Initialize user settings
+    cl.user_session.set(
+        "user_settings",
+        {
+            "temperature": 0.5,
+            "top_p": 1.0,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+        },
+    )
+
+    # Get user.display_name, if none, ask from the user
     current_user = cl.user_session.get("user")
     display_name = current_user.display_name
 
     if not display_name:
         response = await cl.AskUserMessage(
-            content="What should I call you?", timeout=180, raise_on_timeout=True
+            content="What should I call you?", timeout=180
         ).send()
 
         current_user.display_name = response["output"]
@@ -48,6 +92,7 @@ async def start_chat():
 
     chat_profile = cl.user_session.get("chat_profile")
 
+    # Initialization of openai
     client = OpenAIClient(API_KEY=API_KEY, API_URL=API_URL, model=chat_profile)
     cl.user_session.set(
         "message_history",
@@ -78,6 +123,7 @@ async def main(message: cl.Message):
     openai_client = cl.user_session.get("openai_client")
     message_history = cl.user_session.get("message_history")
     message_counter = cl.user_session.get("message_counter")
+    user_settings = cl.user_session.get("user_settings")
 
     message_history.append({"role": "user", "content": message.content})
     message_counter += 1
@@ -87,7 +133,14 @@ async def main(message: cl.Message):
     # Sends the empty message to the frontend — the user now sees a “thinking” message bubble.
     await response.send()
 
-    await openai_client.stream_update_response(message_history, response)
+    await openai_client.stream_update_response(
+        message_history=message_history,
+        response=response,
+        temperature=user_settings["temperature"],
+        top_p=user_settings["top_p"],
+        frequency_penalty=user_settings["frequency_penalty"],
+        presence_penalty=user_settings["presence_penalty"],
+    )
 
     message_counter += 1
 
@@ -136,3 +189,17 @@ async def chat_profile():
             icon="https://picsum.photos/300",
         ),
     ]
+
+
+@cl.on_settings_update
+async def get_setting(settings):
+    # Override user settings
+    cl.user_session.set("user_settings", settings)
+
+    # Send a message to confirm settings were updated
+    await cl.Message(
+        content=f"Settings updated: Temperature={settings.get('temperature', 0.5)}, "
+        f"Top P={settings.get('top_p', 1.0)}, "
+        f"Frequency Penalty={settings.get('frequency_penalty', 0.0)}, "
+        f"Presence Penalty={settings.get('presence_penalty', 0.0)}"
+    ).send()
