@@ -2,9 +2,11 @@ import os
 
 import chainlit as cl
 from dotenv import load_dotenv
+from prisma import Prisma
 
 from openai_client import OpenAIClient
 from chainlit.input_widget import Select, Switch, Slider
+from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 
 load_dotenv()
 
@@ -12,7 +14,8 @@ API_KEY = os.environ["HF_TOKEN"]
 API_URL = os.environ["API_URL"]
 MODEL_NUM1 = os.environ["MODEL_NUM1"]
 MODEL_NUM2 = os.environ["MODEL_NUM2"]
-MODEL_NUM3 = os.environ["MODEL_NUM3"]
+DATABASE_URL = os.environ["DATABASE_URL2"]
+
 MAX_HISTORY = 10
 
 
@@ -20,12 +23,10 @@ MAX_HISTORY = 10
 def auth_callback(username: str, password: str):
     # Fetch the user matching username from your database
     # and compare the hashed password with the value stored in the database
-    if (username, password) == (
-        "admin",
-        "admin",
-    ):  # TODO This is a fake authentication system!
+    if (username, password) == ("admin", "admin"):
         return cl.User(
-            identifier="admin", metadata={"role": "admin", "provider": "credentials"}
+            identifier="admin",
+            metadata={"role": "admin", "provider": "credentials"},
         )
     else:
         return None
@@ -76,9 +77,19 @@ async def start_chat():
         },
     )
 
-    # Get user.display_name, if none, ask from the user
+    # Get user and fetch display_name from database
     current_user = cl.user_session.get("user")
-    display_name = current_user.display_name
+
+    # Fetch display_name from database
+    prisma = Prisma()
+    await prisma.connect()
+    db_user = await prisma.user.find_unique(
+        where={"identifier": current_user.identifier}
+    )
+    await prisma.disconnect()
+
+    display_name = db_user.displayName if db_user else None
+    current_user.display_name = display_name
 
     if not display_name:
         response = await cl.AskUserMessage(
@@ -86,7 +97,14 @@ async def start_chat():
         ).send()
 
         current_user.display_name = response["output"]
-        # current_user.display_name = response.output
+
+        prisma = Prisma()
+        await prisma.connect()
+        await prisma.user.update(
+            where={"identifier": current_user.identifier},
+            data={"displayName": response["output"]},
+        )
+        await prisma.disconnect()
 
         cl.user_session.set("user", current_user)
 
@@ -183,11 +201,6 @@ async def chat_profile():
             markdown_description=f"The underlying LLM model is **{MODEL_NUM2}**",
             icon="https://picsum.photos/250",
         ),
-        cl.ChatProfile(
-            name=f"{MODEL_NUM3}",
-            markdown_description=f"The underlying LLM model is **{MODEL_NUM3}**",
-            icon="https://picsum.photos/300",
-        ),
     ]
 
 
@@ -203,6 +216,7 @@ async def get_setting(settings):
         f"Frequency Penalty={settings.get('frequency_penalty', 0.0)}, "
         f"Presence Penalty={settings.get('presence_penalty', 0.0)}"
     ).send()
+
 
 # To test or debug your application files and decorated functions, you will need to provide the Chainlit context to your test suite.
 # run the script from your IDE in debug mode.
