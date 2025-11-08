@@ -203,3 +203,10 @@ async def get_setting(settings):
         f"Frequency Penalty={settings.get('frequency_penalty', 0.0)}, "
         f"Presence Penalty={settings.get('presence_penalty', 0.0)}"
     ).send()
+
+# To test or debug your application files and decorated functions, you will need to provide the Chainlit context to your test suite.
+# run the script from your IDE in debug mode.
+if __name__ == "__main__":
+    from chainlit.cli import run_chainlit
+
+    run_chainlit(__file__)
