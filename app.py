@@ -1,12 +1,12 @@
 import os
-
 import chainlit as cl
 from dotenv import load_dotenv
-from prisma import Prisma
-
-from openai_client import OpenAIClient
+from openai import AsyncOpenAI
 from chainlit.input_widget import Select, Switch, Slider
-from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.types import ThreadDict
+
+# temp imports
+import json
 
 load_dotenv()
 
@@ -14,28 +14,14 @@ API_KEY = os.environ["HF_TOKEN"]
 API_URL = os.environ["API_URL"]
 MODEL_NUM1 = os.environ["MODEL_NUM1"]
 MODEL_NUM2 = os.environ["MODEL_NUM2"]
-DATABASE_URL = os.environ["DATABASE_URL2"]
 
-MAX_HISTORY = 10
-
-
-@cl.password_auth_callback
-def auth_callback(username: str, password: str):
-    # Fetch the user matching username from your database
-    # and compare the hashed password with the value stored in the database
-    if (username, password) == ("admin", "admin"):
-        return cl.User(
-            identifier="admin",
-            metadata={"role": "admin", "provider": "credentials"},
-        )
-    else:
-        return None
+# ------- openai ---------
+cl.instrument_openai
+client = AsyncOpenAI(base_url=API_URL, api_key=API_KEY)
 
 
 @cl.on_chat_start
-async def start_chat():
-
-    # Initializing chat settings
+async def init_chat():
     setting = await cl.ChatSettings(
         [
             Slider(
@@ -77,115 +63,81 @@ async def start_chat():
         },
     )
 
-    # Get user and fetch display_name from database
-    current_user = cl.user_session.get("user")
-
-    # Fetch display_name from database
-    prisma = Prisma()
-    await prisma.connect()
-    db_user = await prisma.user.find_unique(
-        where={"identifier": current_user.identifier}
-    )
-    await prisma.disconnect()
-
-    display_name = db_user.displayName if db_user else None
-    current_user.display_name = display_name
-
-    if not display_name:
-        response = await cl.AskUserMessage(
-            content="What should I call you?", timeout=180
-        ).send()
-
-        current_user.display_name = response["output"]
-
-        prisma = Prisma()
-        await prisma.connect()
-        await prisma.user.update(
-            where={"identifier": current_user.identifier},
-            data={"displayName": response["output"]},
-        )
-        await prisma.disconnect()
-
-        cl.user_session.set("user", current_user)
-
-    chat_profile = cl.user_session.get("chat_profile")
-
-    # Initialization of openai
-    client = OpenAIClient(API_KEY=API_KEY, API_URL=API_URL, model=chat_profile)
     cl.user_session.set(
         "message_history",
         [
             {
                 "role": "system",
-                "content": f"You are a helpful assistant. The user's name is {current_user.display_name}. Keep answers concise.",
+                "content": f"You are a helpful assistant. Keep answers concise.",
             },
         ],
     )
-    cl.user_session.set("openai_client", client)
-    cl.user_session.set("message_counter", 1)
-
-    await main(cl.Message(content=f"My name is {current_user.display_name}"))
 
 
-@cl.on_message  # This will call every time the user input a message in hte UI
-async def main(message: cl.Message):
-    actions = [
-        cl.Action(
-            label="Explain more",
-            name="explain_more_button",
-            icon="chart-no-axes-gantt",
-            payload={"role": "user", "message": "Explain more!"},
-        )
-    ]
+@cl.on_chat_resume
+async def resume_conversation(thread: ThreadDict):
+    # Initialize user settings
+    cl.user_session.set("user_settings", thread["metadata"]["chat_settings"])
+    cl.user_session.set("message_history", thread["metadata"]["message_history"])
 
-    openai_client = cl.user_session.get("openai_client")
-    message_history = cl.user_session.get("message_history")
-    message_counter = cl.user_session.get("message_counter")
+
+@cl.on_message
+async def stream_message(message: cl.Message):
     user_settings = cl.user_session.get("user_settings")
+    message_history = cl.user_session.get("message_history")
+    chat_profile = cl.user_session.get("chat_profile")
 
     message_history.append({"role": "user", "content": message.content})
-    message_counter += 1
 
-    response = cl.Message(content="", actions=actions)
-
-    # Sends the empty message to the frontend — the user now sees a “thinking” message bubble.
-    await response.send()
-
-    await openai_client.stream_update_response(
-        message_history=message_history,
-        response=response,
+    stream = await client.chat.completions.create(
+        model=chat_profile,
+        stream=True,
+        messages=message_history,
         temperature=user_settings["temperature"],
         top_p=user_settings["top_p"],
         frequency_penalty=user_settings["frequency_penalty"],
         presence_penalty=user_settings["presence_penalty"],
     )
 
-    message_counter += 1
-
-    cl.user_session.set("message_history", message_history)
-    cl.user_session.set("message_counter", message_counter)
-
-
-@cl.set_starters
-async def set_starters():
-    return [
-        cl.Starter(
-            label="Do you want to know me?",
-            message="Introduce yourself.",
-            icon="/public/icon/bulb.svg",
-        ),
-        cl.Starter(
-            label="Want to create a daily routine?",
-            message="Create a daily routine for me.",
-            icon="/public/icon/list.svg",
-        ),
+    # Custom action
+    actions = [
+        cl.Action(
+            label="Explain more",
+            name="explain_more_button",
+            icon="chart-no-axes-gantt",
+            payload={"role": "system", "message": "Explain more!"},
+        )
     ]
 
+    response = cl.Message(content="", actions=actions)
 
-@cl.action_callback(name="explain_more_button")
-async def on_action(action: cl.Action):
-    message = cl.Message(content=action.payload)
-    await main(message)
+    async with stream:
+
+        async for chunk in stream:
+            try:
+                if token := chunk.choices[0].delta.content or "":
+                    await response.stream_token(token)
+            except (IndexError, AttributeError):
+                continue  # Handle malformed chunks
+
+        message_history.append({"role": "assistant", "content": response.content})
+        await response.update()
+
+    cl.user_session.set("message_history", message_history)
+
+
+@cl.on_settings_update
+async def get_setting(settings):
+    # Override user settings
+    cl.user_session.set("user_settings", settings)
+
+    # Send a message to confirm settings were updated
+    await cl.Message(
+        content=f"Settings updated: Temperature={settings.get('temperature', 0.5)}, "
+        f"Top P={settings.get('top_p', 1.0)}, "
+        f"Frequency Penalty={settings.get('frequency_penalty', 0.0)}, "
+        f"Presence Penalty={settings.get('presence_penalty', 0.0)}"
+    ).send()
 
 
 @cl.set_chat_profiles
@@ -204,18 +156,22 @@ async def chat_profile():
     ]
 
 
-@cl.on_settings_update
-async def get_setting(settings):
-    # Override user settings
-    cl.user_session.set("user_settings", settings)
+@cl.password_auth_callback
+def auth_callback(username: str, password: str):
+    # Fetch the user matching username from your database
+    # and compare the hashed password with the value stored in the database
+    if (username, password) == ("admin", "admin"):
+        return cl.User(
+            identifier="admin",
+            metadata={"role": "admin", "provider": "credentials"},
+        )
+    else:
+        return None
 
-    # Send a message to confirm settings were updated
-    await cl.Message(
-        content=f"Settings updated: Temperature={settings.get('temperature', 0.5)}, "
-        f"Top P={settings.get('top_p', 1.0)}, "
-        f"Frequency Penalty={settings.get('frequency_penalty', 0.0)}, "
-        f"Presence Penalty={settings.get('presence_penalty', 0.0)}"
-    ).send()
+
+@cl.action_callback(name="explain_more_button")
+async def on_action(action: cl.Action):
+    await stream_message(cl.Message(content=action.payload))
 
 
 # To test or debug your application files and decorated functions, you will need to provide the Chainlit context to your test suite.
