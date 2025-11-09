@@ -1,7 +1,8 @@
 import os
 import chainlit as cl
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from langfuse.openai import AsyncOpenAI
+from langfuse import Langfuse
 from chainlit.input_widget import Select, Switch, Slider
 from chainlit.types import ThreadDict
 
@@ -9,6 +10,14 @@ from chainlit.types import ThreadDict
 import json
 
 load_dotenv()
+
+# Debug Langfuse config
+print(f"LANGFUSE_HOST: {os.environ.get('LANGFUSE_HOST')}")
+print(f"LANGFUSE_PUBLIC_KEY: {os.environ.get('LANGFUSE_PUBLIC_KEY')}")
+print(f"LANGFUSE_SECRET_KEY exists: {bool(os.environ.get('LANGFUSE_SECRET_KEY'))}")
+
+# Initialize Langfuse
+langfuse = Langfuse()
 
 API_KEY = os.environ["HF_TOKEN"]
 API_URL = os.environ["API_URL"]
